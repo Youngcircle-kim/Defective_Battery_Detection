@@ -1,0 +1,47 @@
+# Data & models
+data/
+data_stage1/
+data_stage2_full/
+data_stage2_patches/
+runs/
+weights/
+*.pt
+*.onnx
+*.engine
+
+# Outputs
+*.png
+*.jpg
+*.jpeg
+!docs/**/*.png
+!docs/**/*.jpg
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+wandb/
+mlruns/
+lightning_logs/
+
+# Notebooks
+.ipynb_checkpoints/
