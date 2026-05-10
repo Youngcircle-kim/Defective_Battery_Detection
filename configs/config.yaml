@@ -4,7 +4,7 @@
 # 1. 데이터 경로
 # ─────────────────────────────────────────────
 paths:
-  # 원본 데이터셋 (사용자 제공 구조)
+  # 원본 데이터셋
   raw_train_images: data/Training/image_data/images
   raw_train_labels: data/Training/label_data/labels
   raw_val_images: data/Validation/image_data/images
@@ -18,34 +18,24 @@ paths:
   stage2_patches_root: data_stage2_patches
 
 # ─────────────────────────────────────────────
-# 2. 원본 라벨 클래스 매핑
-#    원본 .txt가 어떤 class id를 쓰는지 명시
-#    (확인 필요 — 실제 데이터에 맞게 수정)
-# ─────────────────────────────────────────────
-source_classes:
-  battery_outline: 0
-  damaged: 1
-  pollution: 2
-
-# ─────────────────────────────────────────────
-# 3. 이미지 / 좌표 설정
+# 2. 이미지 / 좌표 설정
 # ─────────────────────────────────────────────
 image:
   width: 1920
   height: 1080
 
 # ─────────────────────────────────────────────
-# 4. Damaged → large/small 분리 기준
+# 3. Damaged → large/small 분리 기준
 # ─────────────────────────────────────────────
 # bbox의 max(w,h)이 threshold 이상이면 large, 미만이면 small
 # (원본 1920x1080 픽셀 기준)
 # 64px 기준 근거: 640x640 letterbox에서 ~21px → 일반 YOLO 검출 한계
 damage_split:
-  method: bbox_max_side    # 'bbox_max_side' | 'bbox_area_sqrt' | 'polygon_area_sqrt'
+  method: bbox_max_side # 'bbox_max_side' | 'bbox_area_sqrt' | 'polygon_area_sqrt'
   threshold_pixels: 64
 
 # ─────────────────────────────────────────────
-# 5. Stage 1 (Global) 모델
+# 4. Stage 1 (Global) 모델
 # ─────────────────────────────────────────────
 stage1:
   classes:
@@ -54,8 +44,8 @@ stage1:
   model: yolo11s-seg.pt
   imgsz: 640
   epochs: 100
-  batch: 8                 # GTX 3060 8GB 기준
-  device: 0                # cuda:0 (CPU면 'cpu')
+  batch: 8 # GTX 3060 8GB 기준
+  device: 0 # cuda:0 (CPU면 'cpu')
   patience: 20
   optimizer: AdamW
   lr0: 0.001
@@ -63,16 +53,16 @@ stage1:
   name: stage1
 
 # ─────────────────────────────────────────────
-# 6. Stage 2 (Patch) 모델
+# 5. Stage 2 (Patch) 모델
 # ─────────────────────────────────────────────
 stage2:
   classes:
     damaged_small: 0
     pollution: 1
   model: yolo11s-seg.pt
-  imgsz: 640               # patch가 320 → 640으로 resize 됨
+  imgsz: 640 # patch가 320 → 640으로 resize 됨
   epochs: 100
-  batch: 16                # patch는 더 작으니 batch 2배
+  batch: 16 # patch는 더 작으니 batch 2배
   device: 0
   patience: 20
   optimizer: AdamW
@@ -82,31 +72,59 @@ stage2:
 
   # Patch 생성 파라미터
   patch_size: 320
-  patch_stride: 160        # 50% overlap
+  patch_stride: 160 # 50% overlap
   # 빈 patch (positive 라벨 없음) 비율 — 1.0이면 positive와 동일 수
   negative_patch_ratio: 1.0
   # patch 내 polygon 면적이 이 값(픽셀^2) 미만이면 라벨 제외
   min_polygon_area_px: 9
 
 # ─────────────────────────────────────────────
-# 7. 추론 (Inference)
+# 6. 추론 (Inference)
 # ─────────────────────────────────────────────
 inference:
   stage1_weights: runs/stage1/weights/best.pt
   stage2_weights: runs/stage2/weights/best.pt
-  roi_margin: 0.1                # 10%
-  patch_merge: max_conf          # 'max_conf' | 'union'
+  roi_margin: 0.1 # 10%
+  patch_merge: max_conf # 'max_conf' | 'union'
   conf_threshold: 0.25
   iou_threshold: 0.5
-  morph_kernel: 3                # noise 제거용 morphology kernel size (px)
-  morph_min_area_px: 25          # 이 픽셀 수 미만 component 제거
+  morph_kernel: 3 # noise 제거용 morphology kernel size (px)
+  morph_min_area_px: 25 # 이 픽셀 수 미만 component 제거
 
 # ─────────────────────────────────────────────
-# 8. 시각화
+# 7. 시각화
 # ─────────────────────────────────────────────
 viz:
-  colors:                        # BGR
+  colors: # BGR
     battery_outline: [255, 100, 50]
     damaged: [50, 100, 255]
     pollution: [50, 220, 50]
   alpha: 0.45
+
+# ─────────────────────────────────────────────
+# 8. JSON 라벨 스키마 (실제 데이터셋에 맞춰 검증됨)
+# ─────────────────────────────────────────────
+json_schema:
+  # battery_outline polygon 위치
+  # (swelling 객체 아래에 컨테이너 형태로 들어있음)
+  battery_outline_path: 'swelling.battery_outline'
+
+  # defects 배열 위치
+  defects_array_path: 'defects'
+
+  # 각 defect 안의 클래스 이름 키
+  defect_name_key: 'name'
+
+  # 각 defect 안의 polygon 좌표 키
+  defect_polygon_key: 'points'
+
+  # defect.name 매칭 문자열 (대소문자 무시 처리됨)
+  damaged_name: 'Damaged'
+  pollution_name: 'Pollution'
+
+  # 이미지 크기
+  image_width_path: 'image_info.width'
+  image_height_path: 'image_info.height'
+
+  # is_normal 플래그
+  is_normal_path: 'image_info.is_normal'

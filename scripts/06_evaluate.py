@@ -1,7 +1,7 @@
 """
 Validation set 전체에 대해 segmentation metric 평가.
 
-원본 통합 라벨(GT)을 클래스별 binary mask로 렌더링한 뒤
+원본 JSON 라벨(GT)을 클래스별 binary mask로 렌더링한 뒤
 파이프라인 예측 mask와 비교 → IoU, F1, Pixel Accuracy, mIoU.
 """
 from __future__ import annotations
@@ -18,36 +18,36 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.data_utils import (
-    denormalize_polygon,
-    list_image_files,
-    load_config,
-    read_yolo_seg_label,
-)
+from src.data_utils import list_image_files, load_config
+from src.json_label_loader import parse_json_label
 from src.metrics import aggregate_metrics, evaluate_sample
 from src.pipeline import TwoStageBatteryPipeline
 
 
 def gt_masks_from_label(
-    label_path: Path, w: int, h: int, src_classes: Dict[str, int]
+    label_path: Path, w: int, h: int, schema: dict
 ) -> Dict[str, np.ndarray]:
-    """원본 통합 라벨 → 클래스명별 binary mask."""
+    """JSON 라벨 → 클래스명별 binary mask (절대 픽셀 좌표 사용)."""
     masks = {
         "battery_outline": np.zeros((h, w), dtype=bool),
         "damaged":         np.zeros((h, w), dtype=bool),  # large+small 통합
         "pollution":       np.zeros((h, w), dtype=bool),
     }
-    items = read_yolo_seg_label(label_path)
-    inv = {v: k for k, v in src_classes.items()}
+    if not label_path.exists():
+        return masks
 
-    for cls_id, poly_norm in items:
-        name = inv.get(cls_id)
-        if name not in masks:
-            continue
-        poly_px = denormalize_polygon(poly_norm, w, h).astype(np.int32)
-        layer = np.zeros((h, w), dtype=np.uint8)
-        cv2.fillPoly(layer, [poly_px], 1)
-        masks[name] |= layer.astype(bool)
+    try:
+        parsed = parse_json_label(label_path, schema)
+    except Exception as e:
+        print(f"[warn] JSON 파싱 실패 {label_path.name}: {e}")
+        return masks
+
+    for cls_name, polys in parsed.items():
+        for poly_px in polys:
+            poly_int = poly_px.astype(np.int32)
+            layer = np.zeros((h, w), dtype=np.uint8)
+            cv2.fillPoly(layer, [poly_int], 1)
+            masks[cls_name] |= layer.astype(bool)
     return masks
 
 
@@ -87,7 +87,7 @@ def main():
         morph_min_area_px=cfg["inference"]["morph_min_area_px"],
     )
 
-    src_classes = cfg["source_classes"]
+    schema = cfg["json_schema"]
     img_paths = list_image_files(img_dir)
     if args.limit > 0:
         img_paths = img_paths[: args.limit]
@@ -102,7 +102,7 @@ def main():
             continue
         h, w = img.shape[:2]
         gt = gt_masks_from_label(
-            lbl_dir / (img_path.stem + ".txt"), w, h, src_classes
+            lbl_dir / (img_path.stem + ".json"), w, h, schema,
         )
         pred = pipe.predict(img)
 
