@@ -41,12 +41,12 @@ stage1:
   classes:
     battery_outline: 0
     damaged_large: 1
-  model: yolo11s-seg.pt
+  model: yolo11l-seg.pt
   imgsz: 640
-  epochs: 100
-  batch: 8 # GTX 3060 8GB 기준
+  epochs: 40
+  batch: 24 # GTX 3060 8GB 기준
   device: 0 # cuda:0 (CPU면 'cpu')
-  patience: 20
+  patience: 12
   optimizer: AdamW
   lr0: 0.001
   project: runs
@@ -59,9 +59,9 @@ stage2:
   classes:
     damaged_small: 0
     pollution: 1
-  model: yolo11s-seg.pt
+  model: yolo11m-seg.pt
   imgsz: 640 # patch가 320 → 640으로 resize 됨
-  epochs: 100
+  epochs: 25
   batch: 16 # patch는 더 작으니 batch 2배
   device: 0
   patience: 20
