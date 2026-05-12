@@ -44,8 +44,8 @@ stage1:
   model: yolo11l-seg.pt
   imgsz: 640
   epochs: 40
-  batch: 24 # GTX 3060 8GB 기준
-  device: 0 # cuda:0 (CPU면 'cpu')
+  batch: 48 
+  device: 0 
   patience: 12
   optimizer: AdamW
   lr0: 0.001

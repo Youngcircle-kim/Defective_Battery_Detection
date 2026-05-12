@@ -40,17 +40,17 @@ def main():
         name=s1["name"],
         exist_ok=True,
         resume=args.resume,
-        # A100 최적화
+
         amp=True,            # mixed precision (FP16)
         cache=False,         # 200k 이미지라 ram 캐싱 불가. disk도 너무 큼
-        workers=8,           # DataLoader worker
-        # 학습 안정화
+        workers=16,           # DataLoader worker
+
         cos_lr=True,         # cosine LR schedule
         close_mosaic=10,     # 마지막 10 epoch는 mosaic 끄기 (수렴 도움)
-        # 로깅
+
         plots=True,
         save=True,
-        save_period=10,      # 10 epoch마다 체크포인트
+        save_period=10,      
         verbose=True,
     )
     print("Stage1 학습 완료.")
