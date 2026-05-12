@@ -42,7 +42,7 @@ def main():
         resume=args.resume,
         amp=True,
         cache=False,
-        workers=4,
+        workers=8,
     )
     print("Stage2 학습 완료.")
 

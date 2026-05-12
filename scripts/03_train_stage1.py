@@ -47,7 +47,6 @@ def main():
 
         cos_lr=True,         # cosine LR schedule
         close_mosaic=10,     # 마지막 10 epoch는 mosaic 끄기 (수렴 도움)
-
         plots=True,
         save=True,
         save_period=10,      
