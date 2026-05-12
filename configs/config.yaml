@@ -43,9 +43,9 @@ stage1:
     damaged_large: 1
   model: yolo11l-seg.pt
   imgsz: 640
-  epochs: 40
-  batch: 48 
-  device: 0 
+  epochs: 5 # orignial : 40
+  batch: 48
+  device: 0
   patience: 12
   optimizer: AdamW
   lr0: 0.001
@@ -61,7 +61,7 @@ stage2:
     pollution: 1
   model: yolo11m-seg.pt
   imgsz: 640 # patch가 320 → 640으로 resize 됨
-  epochs: 25
+  epochs: 5 # orignial : 25
   batch: 16 # patch는 더 작으니 batch 2배
   device: 0
   patience: 20
