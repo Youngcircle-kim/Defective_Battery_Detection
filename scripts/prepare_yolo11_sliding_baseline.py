@@ -1,40 +1,24 @@
-"""Prepare YOLOv11-Seg sliding-crop baseline dataset.
-
-Input:
-  Original full images + JSON labels
-
-Output:
-  data_yolo11_sliding_baseline/
-  ├── images/train
-  ├── images/val
-  ├── images/test
-  ├── labels/train
-  ├── labels/val
-  ├── labels/test
-  └── data.yaml
+"""Prepare YOLOv11-Seg sliding-crop baseline dataset in parallel.
 
 Classes:
   0: battery_outline
   1: damaged
   2: pollution
 
-Method:
-  - Slide 640x640 crop over full image.
-  - Clip GT polygons to each crop.
-  - Convert clipped polygons to YOLO segmentation label.
-  - Keep positive patches.
-  - Optionally keep negative patches by ratio.
+Parallelization:
+  - Image-level multiprocessing
+  - Each worker loads one full image, generates sliding crops, clips labels, saves patches
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing as mp
 import random
 import shutil
 import sys
 from pathlib import Path
-from typing import Iterable
 
 import cv2
 import numpy as np
@@ -57,19 +41,13 @@ CLASSES = {
     "pollution": 2,
 }
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+_CFG = None
 
 
-def read_json_raw(path: Path) -> dict:
-    for enc in ["utf-8", "utf-8-sig", "cp949"]:
-        try:
-            with open(path, "r", encoding=enc) as f:
-                return json.load(f)
-        except UnicodeDecodeError:
-            continue
-
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        return json.load(f)
+def _init_worker(cfg: dict):
+    global _CFG
+    _CFG = cfg
+    cv2.setNumThreads(0)
 
 
 def find_label_path(labels_dir: Path, image_stem: str) -> Path | None:
@@ -84,12 +62,6 @@ def find_label_path(labels_dir: Path, image_stem: str) -> Path | None:
     return None
 
 
-def polygon_area(poly: np.ndarray) -> float:
-    if poly is None or len(poly) < 3:
-        return 0.0
-    return float(abs(cv2.contourArea(poly.astype(np.float32))))
-
-
 def ensure_xy_array(poly) -> np.ndarray:
     arr = np.asarray(poly, dtype=np.float32)
     if arr.ndim == 1:
@@ -97,13 +69,19 @@ def ensure_xy_array(poly) -> np.ndarray:
     return arr
 
 
-def clip_polygon_to_rect(poly: np.ndarray, x1: int, y1: int, x2: int, y2: int) -> list[np.ndarray]:
-    """Clip polygon to crop rectangle using OpenCV intersectConvexConvex.
+def polygon_area(poly: np.ndarray) -> float:
+    if poly is None or len(poly) < 3:
+        return 0.0
+    return float(abs(cv2.contourArea(poly.astype(np.float32))))
 
-    This assumes polygons are roughly convex enough for OpenCV clipping.
-    For this dataset's annotation polygons, this usually works sufficiently.
-    If clipping fails, fallback keeps points inside crop.
-    """
+
+def clip_polygon_to_rect(
+    poly: np.ndarray,
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+) -> list[np.ndarray]:
     poly = ensure_xy_array(poly)
 
     if len(poly) < 3:
@@ -125,14 +103,12 @@ def clip_polygon_to_rect(poly: np.ndarray, x1: int, y1: int, x2: int, y2: int) -
             return []
 
         inter = inter.reshape(-1, 2)
-
         if len(inter) < 3:
             return []
 
         return [inter.astype(np.float32)]
 
     except Exception:
-        # Fallback: use points inside crop. This is less accurate but prevents crashes.
         inside = poly[
             (poly[:, 0] >= x1)
             & (poly[:, 0] <= x2)
@@ -153,7 +129,12 @@ def polygon_to_patch_local(poly_px: np.ndarray, crop_x: int, crop_y: int) -> np.
     return local
 
 
-def generate_sliding_positions(width: int, height: int, crop_size: int, stride: int) -> list[tuple[int, int]]:
+def generate_sliding_positions(
+    width: int,
+    height: int,
+    crop_size: int,
+    stride: int,
+) -> list[tuple[int, int]]:
     xs = list(range(0, max(1, width - crop_size + 1), stride))
     ys = list(range(0, max(1, height - crop_size + 1), stride))
 
@@ -163,12 +144,7 @@ def generate_sliding_positions(width: int, height: int, crop_size: int, stride: 
     if not ys or ys[-1] != height - crop_size:
         ys.append(max(0, height - crop_size))
 
-    positions = []
-    for y in ys:
-        for x in xs:
-            positions.append((x, y))
-
-    return positions
+    return [(x, y) for y in ys for x in xs]
 
 
 def crop_with_padding(img: np.ndarray, x: int, y: int, crop_size: int) -> np.ndarray:
@@ -185,27 +161,39 @@ def crop_with_padding(img: np.ndarray, x: int, y: int, crop_size: int) -> np.nda
     return padded
 
 
-def convert_one_image_to_patches(
-    img_path: Path,
-    label_path: Path | None,
-    cfg: dict,
-    out_img_dir: Path,
-    out_lbl_dir: Path,
-    split_name: str,
-    crop_size: int,
-    stride: int,
-    min_polygon_area_px: float,
-    negative_ratio: float,
-    jpeg_quality: int,
-    seed: int,
-) -> tuple[int, int]:
+def process_one_image(task):
+    (
+        img_path_str,
+        label_path_str,
+        out_img_dir_str,
+        out_lbl_dir_str,
+        crop_size,
+        stride,
+        min_polygon_area_px,
+        negative_ratio,
+        jpeg_quality,
+        seed,
+    ) = task
+
+    cfg = _CFG
+    schema = cfg["json_schema"]
+
+    img_path = Path(img_path_str)
+    label_path = Path(label_path_str) if label_path_str else None
+    out_img_dir = Path(out_img_dir_str)
+    out_lbl_dir = Path(out_lbl_dir_str)
+
     img = cv2.imread(str(img_path))
     if img is None:
-        print(f"[warn] image read failed: {img_path}")
-        return 0, 0
+        return {
+            "ok": False,
+            "image": img_path.name,
+            "pos": 0,
+            "neg": 0,
+            "error": "image read failed",
+        }
 
     h, w = img.shape[:2]
-    schema = cfg["json_schema"]
 
     all_polys: list[tuple[int, np.ndarray]] = []
 
@@ -213,11 +201,12 @@ def convert_one_image_to_patches(
         try:
             parsed = parse_json_label(label_path, schema)
         except Exception as e:
-            print(f"[warn] JSON parse failed: {label_path.name} | {e}")
-            parsed = {
-                "battery_outline": [],
-                "damaged": [],
-                "pollution": [],
+            return {
+                "ok": False,
+                "image": img_path.name,
+                "pos": 0,
+                "neg": 0,
+                "error": f"json parse failed: {e}",
             }
 
         for poly_px in parsed["battery_outline"]:
@@ -241,7 +230,13 @@ def convert_one_image_to_patches(
         labels = []
 
         for cls_id, poly_px in all_polys:
-            clipped_list = clip_polygon_to_rect(poly_px, crop_x, crop_y, crop_x2, crop_y2)
+            clipped_list = clip_polygon_to_rect(
+                poly_px,
+                crop_x,
+                crop_y,
+                crop_x2,
+                crop_y2,
+            )
 
             for clipped in clipped_list:
                 local_poly = polygon_to_patch_local(clipped, crop_x, crop_y)
@@ -249,7 +244,6 @@ def convert_one_image_to_patches(
                 if polygon_area(local_poly) < min_polygon_area_px:
                     continue
 
-                # Clip local coords to [0, crop_size]
                 local_poly[:, 0] = np.clip(local_poly[:, 0], 0, crop_size)
                 local_poly[:, 1] = np.clip(local_poly[:, 1], 0, crop_size)
 
@@ -266,23 +260,23 @@ def convert_one_image_to_patches(
         else:
             negative_entries.append(entry)
 
-    rng = random.Random(seed + hash(img_path.stem) % 1_000_000)
+    rng = random.Random(seed + (hash(img_path.stem) & 0xFFFFFFFF))
 
     if positive_entries:
         n_neg_keep = int(len(positive_entries) * negative_ratio)
         n_neg_keep = min(n_neg_keep, len(negative_entries))
         negative_keep = rng.sample(negative_entries, n_neg_keep) if n_neg_keep > 0 else []
     else:
-        # 정상 이미지 또는 결함이 crop에 없는 이미지도 완전히 버리면 안 됨.
-        # 단, 너무 많아지는 것을 막기 위해 이미지당 negative 1개만 유지.
         negative_keep = rng.sample(negative_entries, min(1, len(negative_entries))) if negative_entries else []
 
-    selected_entries = [(e, "pos") for e in positive_entries] + [(e, "neg") for e in negative_keep]
+    selected_entries = [(e, "pos") for e in positive_entries] + [
+        (e, "neg") for e in negative_keep
+    ]
+
+    jpg_params = [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality]
 
     n_pos = 0
     n_neg = 0
-
-    jpg_params = [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality]
 
     for (crop_x, crop_y, labels), kind in selected_entries:
         crop_img = crop_with_padding(img, crop_x, crop_y, crop_size)
@@ -299,10 +293,16 @@ def convert_one_image_to_patches(
         else:
             n_neg += 1
 
-    return n_pos, n_neg
+    return {
+        "ok": True,
+        "image": img_path.name,
+        "pos": n_pos,
+        "neg": n_neg,
+        "error": None,
+    }
 
 
-def convert_split(
+def convert_split_parallel(
     cfg: dict,
     images_dir: Path,
     labels_dir: Path,
@@ -315,6 +315,8 @@ def convert_split(
     jpeg_quality: int,
     seed: int,
     limit: int,
+    workers: int,
+    chunksize: int,
 ):
     out_img_dir = out_root / "images" / split_name
     out_lbl_dir = out_root / "labels" / split_name
@@ -327,39 +329,63 @@ def convert_split(
     if limit > 0:
         image_paths = image_paths[:limit]
 
-    print(f"\n[{split_name}] source images: {len(image_paths):,}")
-    print(f"[{split_name}] crop_size={crop_size}, stride={stride}, negative_ratio={negative_ratio}")
-
-    total_pos = 0
-    total_neg = 0
+    tasks = []
     no_label = 0
 
-    for img_path in tqdm(image_paths, desc=f"sliding-{split_name}"):
+    for img_path in image_paths:
         label_path = find_label_path(labels_dir, img_path.stem)
         if label_path is None:
             no_label += 1
+            label_path_str = ""
+        else:
+            label_path_str = str(label_path)
 
-        n_pos, n_neg = convert_one_image_to_patches(
-            img_path=img_path,
-            label_path=label_path,
-            cfg=cfg,
-            out_img_dir=out_img_dir,
-            out_lbl_dir=out_lbl_dir,
-            split_name=split_name,
-            crop_size=crop_size,
-            stride=stride,
-            min_polygon_area_px=min_polygon_area_px,
-            negative_ratio=negative_ratio,
-            jpeg_quality=jpeg_quality,
-            seed=seed,
+        tasks.append(
+            (
+                str(img_path),
+                label_path_str,
+                str(out_img_dir),
+                str(out_lbl_dir),
+                crop_size,
+                stride,
+                min_polygon_area_px,
+                negative_ratio,
+                jpeg_quality,
+                seed,
+            )
         )
 
-        total_pos += n_pos
-        total_neg += n_neg
+    print(f"\n[{split_name}] source images: {len(image_paths):,}")
+    print(f"[{split_name}] workers={workers}, chunksize={chunksize}")
+    print(f"[{split_name}] crop_size={crop_size}, stride={stride}, negative_ratio={negative_ratio}")
+    print(f"[{split_name}] no_label_images={no_label:,}")
+
+    total_pos = 0
+    total_neg = 0
+    error_count = 0
+
+    with mp.Pool(
+        processes=workers,
+        initializer=_init_worker,
+        initargs=(cfg,),
+    ) as pool:
+        for result in tqdm(
+            pool.imap_unordered(process_one_image, tasks, chunksize=chunksize),
+            total=len(tasks),
+            desc=f"sliding-{split_name}",
+        ):
+            if result["ok"]:
+                total_pos += result["pos"]
+                total_neg += result["neg"]
+            else:
+                error_count += 1
+                if error_count <= 10:
+                    print(f"[warn] {result['image']} | {result['error']}")
 
     print(
         f"[{split_name}] positive_patches={total_pos:,}, "
-        f"negative_patches={total_neg:,}, no_label_images={no_label:,}"
+        f"negative_patches={total_neg:,}, "
+        f"errors={error_count:,}"
     )
 
 
@@ -395,9 +421,12 @@ def main():
     parser.add_argument("--jpeg-quality", type=int, default=90)
     parser.add_argument("--seed", type=int, default=42)
 
+    parser.add_argument("--workers", type=int, default=max(1, min(16, mp.cpu_count() - 1)))
+    parser.add_argument("--chunksize", type=int, default=8)
+
     parser.add_argument("--include-test", action="store_true")
     parser.add_argument("--clear", action="store_true")
-    parser.add_argument("--limit", type=int, default=0, help="debug용. split마다 처음 N장만 처리")
+    parser.add_argument("--limit", type=int, default=0)
 
     args = parser.parse_args()
 
@@ -409,7 +438,7 @@ def main():
     if args.clear and out_root.exists():
         shutil.rmtree(out_root)
 
-    convert_split(
+    convert_split_parallel(
         cfg=cfg,
         images_dir=Path(paths["raw_train_images"]),
         labels_dir=Path(paths["raw_train_labels"]),
@@ -422,9 +451,11 @@ def main():
         jpeg_quality=args.jpeg_quality,
         seed=args.seed,
         limit=args.limit,
+        workers=args.workers,
+        chunksize=args.chunksize,
     )
 
-    convert_split(
+    convert_split_parallel(
         cfg=cfg,
         images_dir=Path(paths["raw_val_images"]),
         labels_dir=Path(paths["raw_val_labels"]),
@@ -437,6 +468,8 @@ def main():
         jpeg_quality=args.jpeg_quality,
         seed=args.seed + 1,
         limit=args.limit,
+        workers=args.workers,
+        chunksize=args.chunksize,
     )
 
     if args.include_test:
@@ -444,7 +477,7 @@ def main():
         test_labels = Path("data/Test/label_data/labels")
 
         if test_images.exists() and test_labels.exists():
-            convert_split(
+            convert_split_parallel(
                 cfg=cfg,
                 images_dir=test_images,
                 labels_dir=test_labels,
@@ -457,6 +490,8 @@ def main():
                 jpeg_quality=args.jpeg_quality,
                 seed=args.seed + 2,
                 limit=args.limit,
+                workers=args.workers,
+                chunksize=args.chunksize,
             )
         else:
             print("[warn] Test image/label directory not found. Skipping test split.")
