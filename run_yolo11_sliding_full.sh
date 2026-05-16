@@ -57,7 +57,7 @@ echo "=================================================="
 echo "[1] Prepare sliding-crop dataset"
 echo "=================================================="
 
-python scripts/prepare_yolo11_sliding_baseline_parallel.py \
+python scripts/prepare_yolo11_sliding_full.py \
   --config configs/config.yaml \
   --out "${DATA_ROOT}" \
   --crop-size "${CROP_SIZE}" \
