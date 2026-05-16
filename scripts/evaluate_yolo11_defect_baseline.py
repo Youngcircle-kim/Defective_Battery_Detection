@@ -41,6 +41,58 @@ COLORS = {
     "pollution": (50, 220, 50),
 }
 
+def apply_mask_to_image(
+    image: np.ndarray,
+    mask: np.ndarray,
+    background_value: int = 30,
+) -> np.ndarray:
+    """
+    Keep only masked region and darken the background.
+    """
+    out = np.full_like(image, background_value)
+    out[mask] = image[mask]
+    return out
+
+
+def save_masked_outputs(
+    img: np.ndarray,
+    pred: Dict[str, np.ndarray],
+    out_dir: Path,
+    stem: str,
+) -> None:
+    """
+    Save class-wise masked images and combined masked image.
+    """
+    masked_dir = out_dir / "masked_predictions"
+    binary_dir = out_dir / "binary_masks"
+
+    masked_dir.mkdir(parents=True, exist_ok=True)
+    binary_dir.mkdir(parents=True, exist_ok=True)
+
+    combined_mask = np.zeros(img.shape[:2], dtype=bool)
+
+    for cls_name, mask in pred.items():
+        combined_mask |= mask
+
+        # binary mask 저장
+        cv2.imwrite(
+            str(binary_dir / f"{stem}_{cls_name}_mask.png"),
+            (mask.astype(np.uint8) * 255),
+        )
+
+        # class별 masked image 저장
+        masked_img = apply_mask_to_image(img, mask)
+        cv2.imwrite(
+            str(masked_dir / f"{stem}_{cls_name}_masked.png"),
+            masked_img,
+        )
+
+    # damaged + pollution 통합 masked image
+    combined_masked = apply_mask_to_image(img, combined_mask)
+    cv2.imwrite(
+        str(masked_dir / f"{stem}_combined_defect_masked.png"),
+        combined_masked,
+    )
 
 def find_label_path(label_dir: Path, img_path: Path) -> Path | None:
     candidate = label_dir / f"{img_path.stem}.json"
@@ -249,7 +301,14 @@ def main():
 
         m = evaluate_sample(pred, gt)
         sample_metrics.append(m)
-
+        
+        save_masked_outputs(
+            img=img,
+            pred=pred,
+            out_dir=out,
+            stem=img_path.stem,
+        )
+        
         per_image_log.append(
             {
                 "image": img_path.name,
